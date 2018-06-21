@@ -144,7 +144,7 @@ CHECKPOINT_NAME = '/tmp/_retrain_checkpoint'
 FAKE_QUANT_OPS = ('FakeQuantWithMinMaxVars',
                   'FakeQuantWithMinMaxVarsPerChannel')
 
-const_resized_image_value = np.zeros((30,299,299,3))
+#const_resized_image_value = np.zeros((30,299,299,3))
 
 def create_image_lists(image_dir, testing_percentage, validation_percentage):
   """Builds a list of training images from the file system.
@@ -465,8 +465,8 @@ def get_or_create_bottleneck(sess, image_lists, label_name, index, image_dir,
                            image_dir, category, sess, jpeg_data_tensor,
                            decoded_image_tensor, resized_input_tensor,
                            bottleneck_tensor)
-    if not cache_image:
-      resized_input_value=None
+    #if not cache_image:
+    #  resized_input_value=None
   else:
     resized_input_value = cache_bottleneck_file(bottleneck_path, image_lists, label_name, index,
                            image_dir, category, sess, jpeg_data_tensor,
@@ -583,8 +583,8 @@ def get_random_cached_bottlenecks(sess, image_lists, how_many, category,
       bottleneck,resized_input_value = get_or_create_bottleneck(
           sess, image_lists, label_name, image_index, image_dir, category,
           bottleneck_dir, jpeg_data_tensor, decoded_image_tensor,
-          resized_input_tensor, bottleneck_tensor, module_name, cache_image=False)
-          #resized_input_tensor, bottleneck_tensor, module_name, cache_image=True)
+          #resized_input_tensor, bottleneck_tensor, module_name, cache_image=False)
+          resized_input_tensor, bottleneck_tensor, module_name, cache_image=True)
       bottlenecks.append(bottleneck)
       ground_truths.append(label_index)
       filenames.append(image_name)
@@ -602,8 +602,8 @@ def get_random_cached_bottlenecks(sess, image_lists, how_many, category,
         bottleneck,resized_input_values = get_or_create_bottleneck(
             sess, image_lists, label_name, image_index, image_dir, category,
             bottleneck_dir, jpeg_data_tensor, decoded_image_tensor,
-            resized_input_tensor, bottleneck_tensor, module_name, cache_image=False)
-            #resized_input_tensor, bottleneck_tensor, module_name, cache_image=True)
+            #resized_input_tensor, bottleneck_tensor, module_name, cache_image=False)
+            resized_input_tensor, bottleneck_tensor, module_name, cache_image=True)
         bottlenecks.append(bottleneck)
         ground_truths.append(label_index)
         filenames.append(image_name)
@@ -837,8 +837,15 @@ def add_final_retrain_ops(class_count, final_tensor_name, bottleneck_tensor,
     with tf.name_scope('Wx_plus_b'):
       logits = tf.matmul(bottleneck_input, layer_weights) + layer_biases
       tf.summary.histogram('pre_activations', logits)
-
-  final_tensor = tf.nn.softmax(logits, name=final_tensor_name)
+      tmp_tensor = tf.nn.softmax(logits)
+      if is_training:
+        reg_losses = tf.losses.get_regularization_losses()
+        tf.summary.histogram('reg_loss', reg_losses)
+        tmp_tensor = tf.add(tmp_tensor,tf.add_n(reg_losses))
+  final_tensor=tmp_tensor
+  final_tensor=tf.identity(final_tensor,name=final_tensor_name)
+    #with tf.name_scope('final_loss'):
+      #tf.summary.histogram('final_loss', final_tensor)
 
   # The tf.contrib.quantize functions rewrite the graph in place for
   # quantization. The imported model graph has already been rewritten, so upon
@@ -862,9 +869,20 @@ def add_final_retrain_ops(class_count, final_tensor_name, bottleneck_tensor,
 
   tf.summary.scalar('cross_entropy', cross_entropy_mean)
 
+
   with tf.name_scope('train'):
-    optimizer = tf.train.GradientDescentOptimizer(FLAGS.learning_rate)
-    train_step = optimizer.minimize(cross_entropy_mean)
+    global_step = tf.Variable(0, trainable=False)
+
+    initial_learning_rate = FLAGS.learning_rate
+
+    learning_rate = tf.train.exponential_decay(initial_learning_rate,
+                                           global_step=global_step,
+                                           decay_steps=100,decay_rate=0.95)
+    optimizer = tf.train.GradientDescentOptimizer(learning_rate)
+    #optimizer = tf.train.GradientDescentOptimizer(FLAGS.learning_rate)
+    #train_step = optimizer.minimize(final_loss)
+    train_step = optimizer.minimize(cross_entropy_mean, global_step=global_step)
+  tf.summary.scalar('learning_rate', learning_rate)
 
   return (train_step, cross_entropy_mean, bottleneck_input, ground_truth_input,
           final_tensor)
@@ -1087,6 +1105,7 @@ def main(_):
   # Set up the pre-trained graph.
   module_spec = hub.load_module_spec(FLAGS.tfhub_module)
   graph, bottleneck_tensor, resized_image_tensor, wants_quantization = (
+      #create_module_graph(module_spec, is_training=False))
       create_module_graph(module_spec, is_training=True))
 
   # Add the new layer that we'll be training.
@@ -1153,7 +1172,7 @@ def main(_):
              FLAGS.tfhub_module)
       # Feed the bottlenecks and ground truth into the graph, and run a training
       # step. Capture training summaries for TensorBoard with the `merged` op.
-      resized_image_value = const_resized_image_value
+      #resized_image_value = const_resized_image_value
       train_summary, _ = sess.run(
           [merged, train_step],
           feed_dict={bottleneck_input: train_bottlenecks,
@@ -1168,7 +1187,8 @@ def main(_):
         train_accuracy, cross_entropy_value = sess.run(
             [evaluation_step, cross_entropy],
             feed_dict={bottleneck_input: train_bottlenecks,
-                       ground_truth_input: train_ground_truth})
+                       ground_truth_input: train_ground_truth
+                      })
         tf.logging.info('%s: Step %d: Train accuracy = %.1f%%' %
                         (datetime.now(), i, train_accuracy * 100))
         tf.logging.info('%s: Step %d: Cross entropy = %f' %
